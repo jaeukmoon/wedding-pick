@@ -127,7 +127,7 @@
   }
   #memo-modal.open { display: flex; }
   .memo-box {
-    width: min(480px, 100%); background: var(--bg);
+    width: min(480px, 94vw); background: var(--bg);
     border-radius: 14px; padding: 20px 20px 16px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, .3);
   }
