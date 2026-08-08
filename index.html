@@ -49,6 +49,7 @@
     border-radius: 999px; padding: 6px 14px; cursor: pointer;
   }
   .toolbar button:hover { color: var(--ink); border-color: #cfc7bc; }
+  #sync-status { margin-right: auto; align-self: center; font-size: 12px; color: var(--muted); }
   main { max-width: 1400px; margin: 10px auto 80px; padding: 0 18px; }
   .grid { columns: 4 300px; column-gap: 14px; }
   .card {
@@ -199,6 +200,7 @@
 </nav>
 
 <div class="toolbar">
+  <span id="sync-status"></span>
   <button id="btn-export">선택 목록 내보내기</button>
   <button id="btn-clear">전체 선택 해제</button>
 </div>
@@ -240,8 +242,7 @@
 <script>
 const HEART_SVG = '<svg viewBox="0 0 24 24"><path d="M12 21s-7.5-4.9-10-9.2C.6 8.3 2.4 4.5 6 4.1c2-.2 3.9.8 6 3.2 2.1-2.4 4-3.4 6-3.2 3.6.4 5.4 4.2 4 7.7C19.5 16.1 12 21 12 21z"/></svg>';
 const NOTE_SVG = '<svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
-const SEL_KEY = 'pere-selected';
-const NOTE_KEY = 'pere-notes';
+const STATE_KEY = 'pere-state';
 const KEY_KEY = 'pere-key';
 const SALT_HEX = 'b7a1c9e24d8f3056a2e1907c5b4d6f18';
 const ITER = 300000;
@@ -250,8 +251,21 @@ const $ = id => document.getElementById(id);
 
 let PHOTOS = [];
 let aesKey = null;              // CryptoKey
-let selected = new Set(JSON.parse(localStorage.getItem(SEL_KEY) || '[]'));
-let notes = JSON.parse(localStorage.getItem(NOTE_KEY) || '{}');
+function loadLocalState() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STATE_KEY));
+    if (s && s.likes && s.notes) return s;
+  } catch {}
+  const s = { likes: {}, notes: {} };            // migrate pre-sync per-device format
+  const t = Date.now();
+  for (const f of JSON.parse(localStorage.getItem('pere-selected') || '[]')) s.likes[f] = { v: 1, t };
+  const old = JSON.parse(localStorage.getItem('pere-notes') || '{}');
+  for (const f in old) s.notes[f] = { x: old[f], t };
+  return s;
+}
+let state = loadLocalState();
+const liked = f => state.likes[f]?.v === 1;
+const noteOf = f => (state.notes[f] && state.notes[f].x) || '';
 let tab = 'all';
 let view = [];
 let lbIndex = -1;
@@ -323,28 +337,29 @@ const io = new IntersectionObserver(entries => {
 }, { rootMargin: '900px' });
 
 /* ---------- gallery ---------- */
-function save() { localStorage.setItem(SEL_KEY, JSON.stringify([...selected])); }
+function persist() { localStorage.setItem(STATE_KEY, JSON.stringify(state)); }
 
 function counts() {
   $('count-all').textContent = PHOTOS.length;
-  $('count-sel').textContent = selected.size;
+  $('count-sel').textContent = PHOTOS.filter(p => liked(p.f)).length;
 }
 
 function toggle(f) {
-  selected.has(f) ? selected.delete(f) : selected.add(f);
-  save();
+  state.likes[f] = { v: liked(f) ? 0 : 1, t: Date.now() };
+  persist();
+  schedulePush();
   counts();
   const card = document.querySelector(`.card[data-f="${CSS.escape(f)}"]`);
   if (card) {
-    if (tab === 'sel' && !selected.has(f)) card.remove();
-    else card.classList.toggle('selected', selected.has(f));
+    if (tab === 'sel' && !liked(f)) card.remove();
+    else card.classList.toggle('selected', liked(f));
   }
   if (tab === 'sel' && !document.querySelector('.card')) render();
 }
 
 function render() {
   view = tab === 'all' ? PHOTOS.map((p, i) => i)
-                       : PHOTOS.map((p, i) => i).filter(i => selected.has(PHOTOS[i].f));
+                       : PHOTOS.map((p, i) => i).filter(i => liked(PHOTOS[i].f));
   const grid = $('grid');
   if (!view.length) {
     grid.innerHTML = '<div class="empty">아직 고른 사진이 없어요.<br>전체 사진 탭에서 하트를 눌러 마음에 드는 시안을 담아 보세요.</div>';
@@ -355,13 +370,13 @@ function render() {
   grid.innerHTML = view.map((pi, vi) => {
     const p = PHOTOS[pi];
     return `
-    <div class="card ${selected.has(p.f) ? 'selected' : ''}${notes[p.f] ? ' has-note' : ''}" data-f="${p.f}">
+    <div class="card ${liked(p.f) ? 'selected' : ''}${noteOf(p.f) ? ' has-note' : ''}" data-f="${p.f}">
       <div class="ph" style="aspect-ratio:${p.w}/${p.h}"><img data-p="${pi}" data-v="${vi}" alt="">
         <div class="src"><a href="${p.u}" target="_blank" rel="noreferrer">${esc(p.t)}</a></div>
       </div>
       <button class="heart" title="선택/해제">${HEART_SVG}</button>
       <button class="note-btn" title="메모">${NOTE_SVG}</button>
-      ${tab === 'sel' && notes[p.f] ? `<div class="memo"><div class="memo-label">메모</div>${esc(notes[p.f])}</div>` : ''}
+      ${tab === 'sel' && noteOf(p.f) ? `<div class="memo"><div class="memo-label">메모</div>${esc(noteOf(p.f))}</div>` : ''}
     </div>`;
   }).join('');
   grid.querySelectorAll('img[data-p]').forEach(img => io.observe(img));
@@ -379,26 +394,110 @@ $('grid').addEventListener('click', e => {
 
 /* ---------- memo ---------- */
 let memoTarget = null;
-function saveNotesStore() { localStorage.setItem(NOTE_KEY, JSON.stringify(notes)); }
 function openMemo(f) {
   memoTarget = f;
-  $('memo-text').value = notes[f] || '';
+  $('memo-text').value = noteOf(f);
   $('memo-modal').classList.add('open');
   $('memo-text').focus();
 }
 function closeMemo() { $('memo-modal').classList.remove('open'); memoTarget = null; }
 function commitMemo(text) {
   const f = memoTarget;
-  if (text) notes[f] = text; else delete notes[f];
-  saveNotesStore();
+  state.notes[f] = { x: text, t: Date.now() };
+  persist();
+  schedulePush();
   closeMemo();
   render();
-  if (lbIndex >= 0) $('lb-note').classList.toggle('on', !!notes[f]);
+  if (lbIndex >= 0) $('lb-note').classList.toggle('on', !!text);
 }
 $('memo-save').onclick = () => commitMemo($('memo-text').value.trim());
 $('memo-del').onclick = () => commitMemo('');
 $('memo-cancel').onclick = closeMemo;
 $('memo-modal').addEventListener('click', e => { if (e.target.id === 'memo-modal') closeMemo(); });
+
+/* ---------- cross-device sync via repo state.json ---------- */
+const API = 'https://api.github.com/repos/jaeukmoon/wedding-pick/contents/state.json';
+let token = null, remoteSha = null, pushTimer = null, pushing = false;
+
+function setSync(msg) { $('sync-status').textContent = msg; }
+
+async function loadToken() {
+  try {
+    const r = await fetch('token.bin', { cache: 'no-store' });
+    if (!r.ok) return;
+    token = new TextDecoder().decode(await decryptBuf(await r.arrayBuffer())).trim();
+  } catch {}
+}
+
+function mergeState(remote) {
+  let changed = false, dirty = false;
+  for (const kind of ['likes', 'notes']) {
+    const L = state[kind], R = (remote && remote[kind]) || {};
+    for (const k of new Set([...Object.keys(L), ...Object.keys(R)])) {
+      const l = L[k], r = R[k];
+      if (l && (!r || l.t > r.t)) dirty = true;
+      else if (r && (!l || r.t > l.t)) { L[k] = r; changed = true; }
+    }
+  }
+  return { changed, dirty };
+}
+
+async function pullState() {
+  if (!token) return;
+  try {
+    const r = await fetch(API + '?ref=master', {
+      headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' },
+      cache: 'no-store' });
+    if (r.status === 404) { remoteSha = null; schedulePush(); return; }
+    if (!r.ok) { setSync('연결 안 됨 · 이 기기에는 저장됨'); return; }
+    const j = await r.json();
+    remoteSha = j.sha;
+    const bin = Uint8Array.from(atob(j.content.replace(/\n/g, '')), c => c.charCodeAt(0));
+    const { changed, dirty } = mergeState(JSON.parse(new TextDecoder().decode(bin)));
+    if (changed) { persist(); render(); }
+    if (dirty) schedulePush(); else setSync('모두 저장됨');
+  } catch { setSync('연결 안 됨 · 이 기기에는 저장됨'); }
+}
+
+function schedulePush() {
+  if (!token) { setSync(''); return; }
+  setSync('저장 중...');
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushState, 2000);
+}
+
+async function pushState() {
+  if (!token) return;
+  if (pushing) { schedulePush(); return; }
+  pushing = true;
+  try {
+    const bytes = new TextEncoder().encode(JSON.stringify(state));
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    const payload = { message: 'sync', content: btoa(bin), branch: 'master' };
+    if (remoteSha) payload.sha = remoteSha;
+    const r = await fetch(API, { method: 'PUT',
+      headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' },
+      body: JSON.stringify(payload) });
+    if (r.ok) { remoteSha = (await r.json()).content.sha; setSync('모두 저장됨'); }
+    else if (r.status === 409 || r.status === 422) {   // someone else pushed first: pull-merge, retry
+      await pullState();
+      clearTimeout(pushTimer);
+      pushTimer = setTimeout(pushState, 800);
+    }
+    else setSync('연결 안 됨 · 이 기기에는 저장됨');
+  } catch { setSync('연결 안 됨 · 이 기기에는 저장됨'); }
+  pushing = false;
+}
+
+async function startSync() {
+  await loadToken();
+  if (!token) return;
+  setSync('동기화 중...');
+  await pullState();
+  setInterval(pullState, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pullState(); });
+}
 
 function setTab(t) {
   tab = t;
@@ -411,19 +510,22 @@ $('tab-all').onclick = () => setTab('all');
 $('tab-sel').onclick = () => setTab('sel');
 
 $('btn-clear').onclick = () => {
-  if (!selected.size) return;
-  if (confirm(`선택한 ${selected.size}장을 모두 해제할까요?`)) {
-    selected.clear(); save(); render();
+  const cnt = PHOTOS.filter(p => liked(p.f)).length;
+  if (!cnt) return;
+  if (confirm(`선택한 ${cnt}장을 모두 해제할까요?`)) {
+    const t = Date.now();
+    for (const p of PHOTOS) if (liked(p.f)) state.likes[p.f] = { v: 0, t };
+    persist(); schedulePush(); render();
   }
 };
 
 $('btn-export').onclick = () => {
-  if (!selected.size) { alert('아직 선택한 사진이 없어요.'); return; }
-  const rows = PHOTOS.filter(p => selected.has(p.f))
+  const rows = PHOTOS.filter(p => liked(p.f))
     .map((p, i) => `${i + 1}. ${p.f}`
-      + (notes[p.f] ? `\n   메모: ${notes[p.f].replace(/\n/g, '\n         ')}` : '')
+      + (noteOf(p.f) ? `\n   메모: ${noteOf(p.f).replace(/\n/g, '\n         ')}` : '')
       + `\n   후기: ${p.t}\n   ${p.u}`);
-  const blob = new Blob([`페레 스튜디오 — 선택한 시안 ${selected.size}장\n\n` + rows.join('\n\n')],
+  if (!rows.length) { alert('아직 선택한 사진이 없어요.'); return; }
+  const blob = new Blob([`페레 스튜디오 — 선택한 시안 ${rows.length}장\n\n` + rows.join('\n\n')],
     { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -446,8 +548,8 @@ function updateLb() {
   $('lb-img').removeAttribute('src');
   ensureImg(pi).then(u => { if (view[lbIndex] === pi) $('lb-img').src = u; });
   $('lb-count').textContent = `${lbIndex + 1} / ${view.length}`;
-  $('lb-heart').classList.toggle('on', selected.has(p.f));
-  $('lb-note').classList.toggle('on', !!notes[p.f]);
+  $('lb-heart').classList.toggle('on', liked(p.f));
+  $('lb-note').classList.toggle('on', !!noteOf(p.f));
   $('lb-info').innerHTML = `<a href="${p.u}" target="_blank" rel="noreferrer">${p.t.replace(/</g, '&lt;')}</a>`;
 }
 $('lb-close').onclick = closeLb;
@@ -456,7 +558,7 @@ $('lb-next').onclick = () => { lbIndex = (lbIndex + 1) % view.length; updateLb()
 $('lb-heart').onclick = () => {
   const p = PHOTOS[view[lbIndex]];
   toggle(p.f);
-  $('lb-heart').classList.toggle('on', selected.has(p.f));
+  $('lb-heart').classList.toggle('on', liked(p.f));
 };
 $('lb-note').onclick = () => openMemo(PHOTOS[view[lbIndex]].f);
 $('lightbox').addEventListener('click', e => { if (e.target.id === 'lightbox') closeLb(); });
@@ -492,6 +594,7 @@ async function submitPw() {
     await unlockWith(pw);
     $('gate').remove();
     render();
+    startSync();
   } catch {
     $('pw-err').textContent = '비밀번호가 맞지 않아요';
     $('pw-btn').disabled = false;
@@ -501,7 +604,7 @@ $('pw-btn').onclick = submitPw;
 $('pw').addEventListener('keydown', e => { if (e.key === 'Enter') submitPw(); });
 
 tryStoredKey().then(ok => {
-  if (ok) { $('gate').remove(); render(); }
+  if (ok) { $('gate').remove(); render(); startSync(); }
   else $('pw').focus();
 });
 </script>
