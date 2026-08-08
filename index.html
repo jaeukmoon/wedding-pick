@@ -99,6 +99,7 @@
   @media (hover: hover) {
     .card:hover .src { opacity: 1; pointer-events: auto; }
   }
+  .card.show .src { opacity: 1; pointer-events: auto; }
   .card .src a { color: #fff; text-decoration: none; }
   .empty { text-align: center; color: var(--muted); padding: 90px 20px; font-size: 15px; line-height: 2; }
   footer { text-align: center; color: var(--muted); font-size: 11.5px; line-height: 1.8; padding: 0 20px 40px; }
@@ -391,7 +392,16 @@ $('grid').addEventListener('click', e => {
   if (e.target.closest('.heart')) toggle(card.dataset.f);
   else if (e.target.closest('.note-btn')) openMemo(card.dataset.f);
   else if (e.target.closest('.src')) return;
-  else if (e.target.tagName === 'IMG') openLb(+e.target.dataset.v);
+  else if (e.target.tagName === 'IMG') {
+    // touch devices: first tap reveals the post title, second tap opens the lightbox
+    if (window.matchMedia('(hover: none)').matches && !card.classList.contains('show')) {
+      document.querySelectorAll('.card.show').forEach(c => c.classList.remove('show'));
+      card.classList.add('show');
+    } else {
+      card.classList.remove('show');
+      openLb(+e.target.dataset.v);
+    }
+  }
 });
 
 /* ---------- memo ---------- */
